@@ -1,157 +1,157 @@
 # 🔐 Hybrid Crypto (Rust)
 
-Sistema modular de cifrado híbrido implementado en Rust (edición 2024). Combina la flexibilidad del intercambio asimétrico de claves mediante curvas elípticas (**X25519**) con el rendimiento y autenticación del cifrado simétrico autenticado (**AES-256-GCM**), integrando además almacenamiento seguro de claves privadas en el gestor de credenciales del sistema operativo (**Keyring / Keychain**).
+A modular hybrid encryption system implemented in Rust (2024 edition). It combines the flexibility of asymmetric elliptic curve key exchange (**X25519**) with the high performance and security of authenticated symmetric encryption (**AES-256-GCM**), integrating secure private key storage via the operating system's native credential manager (**Keyring / Keychain**).
 
 ---
 
-## 📋 Tabla de Contenidos
+## 📋 Table of Contents
 
-- [Características Principales](#-características-principales)
-- [Arquitectura Criptográfica](#-arquitectura-criptográfica)
-  - [Estructura del Sobre Digital (`envelope.bin`)](#-estructura-del-sobre-digital-envelopebin)
-  - [Flujo de Cifrado y Descifrado](#-flujo-de-cifrado-y-descifrado)
-- [Estructura del Proyecto](#-estructura-del-proyecto)
-- [Requisitos Previos](#-requisitos-previos)
-- [Guía de Uso](#-guía-de-uso)
-  - [1. Flujo Seguro con Keyring del S.O. (Recomendado)](#1-flujo-seguro-con-keyring-del-so-recomendado)
-  - [2. Flujo Básico en Disco](#2-flujo-básico-en-disco)
-  - [3. Limpieza de Credenciales y Artefactos](#3-limpieza-de-credenciales-y-artefactos)
-- [Consideraciones de Seguridad](#-consideraciones-de-seguridad)
-- [Dependencias](#-dependencias)
-- [Licencia](#-licencia)
-
----
-
-## ✨ Características Principales
-
-- **Cifrado Híbrido Moderno**: Utiliza Diffie-Hellman sobre Curve25519 (X25519) para acordar un secreto compartido, y AES-256-GCM para cifrar el contenido.
-- **Claves Efímeras (PFS parcial)**: El remitente genera un par de claves efímero por cada mensaje, asegurando que el secreto compartido y la clave AES sean únicos para cada sobre.
-- **Cifrado Autenticado (AEAD)**: AES-256-GCM garantiza confidencialidad e integridad; cualquier alteración en el sobre digital o en el texto cifrado es detectada de inmediato.
-- **Resguardo Seguro de Claves**: Soporte para almacenar la clave privada en el gestor nativo de credenciales del S.O. (Linux Secret Service / GNOME Keyring / KWallet, macOS Keychain, Windows Credential Manager).
-- **Sobre Digital Autónomo**: Todo lo necesario para descifrar el mensaje (excepto la clave privada del receptor) viaja empaquetado en un solo formato binario compacto.
+- [Key Features](#-key-features)
+- [Cryptographic Architecture](#-cryptographic-architecture)
+  - [Digital Envelope Layout (`envelope.bin`)](#-digital-envelope-layout-envelopebin)
+  - [Encryption and Decryption Workflow](#-encryption-and-decryption-workflow)
+- [Project Structure](#-project-structure)
+- [Prerequisites](#-prerequisites)
+- [Usage Guide](#-usage-guide)
+  - [1. Secure Flow with OS Keyring (Recommended)](#1-secure-flow-with-os-keyring-recommended)
+  - [2. Basic File-Based Flow](#2-basic-file-based-flow)
+  - [3. Cleaning Credentials and Artifacts](#3-cleaning-credentials-and-artifacts)
+- [Security Considerations](#-security-considerations)
+- [Dependencies](#-dependencies)
+- [License](#-license)
 
 ---
 
-## 🧠 Arquitectura Criptográfica
+## ✨ Key Features
 
-### Estructura del Sobre Digital (`envelope.bin`)
+- **Modern Hybrid Encryption**: Employs Diffie-Hellman over Curve25519 (X25519) to agree on a shared secret, and AES-256-GCM for high-speed symmetric data encryption.
+- **Ephemeral Key Pairs (Sender PFS)**: The sender generates a fresh ephemeral key pair for each message, ensuring the shared secret and AES key are unique per envelope.
+- **Authenticated Encryption (AEAD)**: AES-256-GCM guarantees both confidentiality and ciphertext integrity; any tampering with the envelope header, nonce, or payload is detected immediately.
+- **Secure Key Storage**: Out-of-the-box support for persisting private keys inside the native OS credential manager (Linux Secret Service / GNOME Keyring / KWallet, macOS Keychain, and Windows Credential Manager).
+- **Self-Contained Digital Envelope**: All metadata necessary for decryption (except the recipient's private key) is packaged into a single compact binary format.
 
-El sobre digital empaqueta de forma contigua los elementos indispensables para reconstruir el secreto compartido y descifrar la carga útil:
+---
+
+## 🧠 Cryptographic Architecture
+
+### Digital Envelope Layout (`envelope.bin`)
+
+The digital envelope packs all necessary components contiguously to allow the recipient to reconstruct the shared secret and decrypt the payload:
 
 ```text
 +-----------------------------+--------------------+---------------------------------------+
-| Clave Pública Efímera       | Nonce (IV)         | Texto Cifrado + Tag de Autenticación  |
+| Sender Ephemeral Public Key | Nonce (IV)         | Ciphertext + Authentication Tag       |
 | 32 bytes                    | 12 bytes           | N bytes                               |
-| (Sender Ephemeral Public)   | (AES-GCM Nonce)    | (AES-256-GCM Ciphertext + 16B MAC)    |
+| (X25519 Public Key)         | (AES-GCM Nonce)    | (AES-256-GCM Ciphertext + 16-byte MAC)|
 +-----------------------------+--------------------+---------------------------------------+
 0                             32                   44                                    44 + N
 ```
 
-### Flujo de Cifrado y Descifrado
+### Encryption and Decryption Workflow
 
 ```text
-[Remitente]                                               [Destinatario]
+[Sender]                                                  [Recipient]
     |                                                           |
-    |-- 1. Genera par efímero (sk_e, pk_e)                      |
-    |-- 2. Diffie-Hellman(sk_e, pk_destinatario)                |
+    |-- 1. Generate ephemeral pair (sk_e, pk_e)                 |
+    |-- 2. Diffie-Hellman(sk_e, pk_recipient)                   |
     |      => shared_secret (32 bytes)                          |
-    |-- 3. Deriva clave AES-256 a partir del secreto            |
-    |-- 4. Genera Nonce aleatorio (12 bytes con OsRng)          |
-    |-- 5. Cifra mensaje: AES-256-GCM(shared_key, nonce, texto)  |
-    |-- 6. Empaqueta [pk_e (32B) + nonce (12B) + ciphertext]    |
+    |-- 3. Derive AES-256 key from shared secret                |
+    |-- 4. Generate random Nonce (12 bytes via OsRng)           |
+    |-- 5. Encrypt: AES-256-GCM(shared_key, nonce, plaintext)   |
+    |-- 6. Pack [pk_e (32B) + nonce (12B) + ciphertext]         |
     |                                                           |
-    |==================== Sobre Digital =======================>|
+    |==================== Digital Envelope ====================>|
     |                                                           |
-    |                                  7. Extrae pk_e y nonce --|
-    |                                  8. Obtiene sk_destinatario
-    |                                     (del Keyring o disco)-|
-    |                                  9. Diffie-Hellman(sk_dest, pk_e)
-    |                                     => shared_secret      |
-    |                                 10. Descifra y valida tag |
-    |                                     con AES-256-GCM       |
+    |                                  7. Extract pk_e & nonce -|
+    |                                  8. Retrieve sk_recipient |
+    |                                     (from Keyring or disk)|
+    |                                  9. Diffie-Hellman(sk_rec,|
+    |                                     pk_e) => shared_secret|
+    |                                 10. Decrypt & verify tag  |
+    |                                     via AES-256-GCM       |
     v                                                           v
 ```
 
 ---
 
-## 📁 Estructura del Proyecto
+## 📁 Project Structure
 
 ```text
 hybrid_crypto/
-├── Cargo.toml            # Definición de dependencias y configuración del paquete
-├── .gitignore            # Exclusión de binarios compilados y artefactos (.bin)
-├── README.md             # Documentación del proyecto
+├── Cargo.toml            # Package configuration and dependencies
+├── .gitignore            # Excludes build binaries and artifact files (*.bin)
+├── README.md             # Project documentation
 └── src/
-    ├── main.rs           # Implementación base con persistencia de claves en disco
+    ├── main.rs           # Base implementation storing keys on disk
     └── bin/
-        ├── keychain.rs   # Implementación segura con Keyring del sistema operativo
-        └── cleankey.rs   # Utilidad para revocar claves del Keyring y limpiar archivos
+        ├── keychain.rs   # Production-ready implementation with OS Keyring
+        └── cleankey.rs   # Maintenance utility to revoke keys and clean files
 ```
 
-- **`src/main.rs`** (`hybrid_crypto`): Flujo demostrativo donde las claves `public_key.bin` y `private_key.bin` se guardan directamente en el sistema de archivos local.
-- **`src/bin/keychain.rs`** (`keychain`): Variante de nivel de producción que almacena la clave privada en el gestor de credenciales del S.O. bajo el servicio `hybrid_crypto_rust` y usuario `recipient_private_key`.
-- **`src/bin/cleankey.rs`** (`cleankey`): Herramienta de mantenimiento para eliminar la clave almacenada en el Keyring y remover `public_key.bin` y `envelope.bin`.
+- **`src/main.rs`** (`hybrid_crypto`): Educational / testing implementation where `public_key.bin` and `private_key.bin` are stored directly on the local filesystem.
+- **`src/bin/keychain.rs`** (`keychain`): Production-grade variant that safeguards the recipient's private key inside the operating system's credential store under service `hybrid_crypto_rust` and user `recipient_private_key`.
+- **`src/bin/cleankey.rs`** (`cleankey`): Utility to remove credentials stored in the OS Keyring and clean up generated `public_key.bin` and `envelope.bin` files.
 
 ---
 
-## 🛠 Requisitos Previos
+## 🛠 Prerequisites
 
-1. **Rust y Cargo**: Cadena de herramientas de Rust actualizada (soporta edición 2024).
+1. **Rust and Cargo**: A modern Rust toolchain (2024 edition compatible).
    ```bash
    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
    ```
-2. **Dependencias del Sistema para Keyring (solo en Linux sin entorno de escritorio completo)**:
-   La crate `keyring` en Linux utiliza D-Bus y la especificación Secret Service (GNOME Keyring, KWallet). Si compilas en entornos mínimos o servidores headless, asegúrate de contar con:
+2. **System Dependencies for Keyring (Linux headless / minimal installations)**:
+   The `keyring` crate uses D-Bus and the Secret Service API on Linux (GNOME Keyring, KWallet). If you are running on a minimal or headless environment, ensure `pkg-config` and `libdbus-1-dev` are installed:
    ```bash
    sudo apt update && sudo apt install -y libdbus-1-dev pkg-config
    ```
 
 ---
 
-## 🚀 Guía de Uso
+## 🚀 Usage Guide
 
-### 1. Flujo Seguro con Keyring del S.O. (Recomendado)
+### 1. Secure Flow with OS Keyring (Recommended)
 
-Ejecuta el binario `keychain`:
+Run the `keychain` binary:
 
 ```bash
 cargo run --bin keychain
 ```
 
-**Comportamiento:**
-1. Comprueba si existe la clave privada en el Keyring del sistema y la pública en `public_key.bin`.
-2. Si no existen, genera un nuevo par X25519, guarda la clave privada en el almacén seguro del S.O. y escribe la pública en `public_key.bin`.
-3. Cifra un mensaje de demostración y genera el sobre digital `envelope.bin`.
-4. Lee el sobre, solicita la clave privada al Keyring del sistema operativo y descifra el mensaje.
+**Lifecycle:**
+1. Checks for an existing private key in the OS Keyring and the public key in `public_key.bin`.
+2. If absent, generates a new X25519 key pair, securely saves the private key into the OS credential store, and writes `public_key.bin`.
+3. Encrypts a demonstration message into `envelope.bin`.
+4. Reads the digital envelope, retrieves the private key from the OS Keyring, and decrypts the message.
 
 ---
 
-### 2. Flujo Básico en Disco
+### 2. Basic File-Based Flow
 
-Para pruebas rápidas de laboratorio donde las claves residen como archivos binarios locales:
+For quick local experiments where keys are stored as raw binary files on disk:
 
 ```bash
 cargo run --bin hybrid_crypto
-# o simplemente:
+# or simply:
 cargo run
 ```
 
-**Archivos generados:**
-- `private_key.bin`: Clave privada X25519 (32 bytes).
-- `public_key.bin`: Clave pública X25519 (32 bytes).
-- `envelope.bin`: Sobre digital cifrado.
+**Generated files:**
+- `private_key.bin`: Raw X25519 private key (32 bytes).
+- `public_key.bin`: Raw X25519 public key (32 bytes).
+- `envelope.bin`: Encrypted digital envelope.
 
 ---
 
-### 3. Limpieza de Credenciales y Artefactos
+### 3. Cleaning Credentials and Artifacts
 
-Para reiniciar el estado, revocar la clave privada del Keyring y eliminar archivos `.bin` temporales:
+To reset your environment, revoke the private key from the OS Keyring, and remove any leftover `.bin` files:
 
 ```bash
 cargo run --bin cleankey
 ```
 
-Salida esperada:
+Expected output:
 ```text
 [-] Llave privada eliminada exitosamente del Keyring del S.O.
 [-] Archivo 'public_key.bin' eliminado localmente.
@@ -160,28 +160,28 @@ Salida esperada:
 
 ---
 
-## 🔒 Consideraciones de Seguridad
+## 🔒 Security Considerations
 
-- **Protección de la Clave Privada**: Guardar claves privadas en archivos en texto plano (`private_key.bin`) es vulnerable a filtraciones accidentales o malware sin privilegios elevados. Por ello, el enfoque basado en `keychain.rs` delega la protección al subsistema criptográfico del sistema operativo.
-- **Exclusión en Git**: Los archivos generados (`*.bin`) están explícitamente ignorados en `.gitignore` para evitar filtraciones de claves y artefactos al repositorio.
-- **Generación Criptográficamente Segura**: Todo material aleatorio (claves y nonces) se obtiene mediante `rand::rngs::OsRng`, recurriendo a fuentes de entropía del kernel (`/dev/urandom` / `getrandom`).
-- **Resistencia a Modificaciones**: Al utilizar el modo AEAD de AES-256-GCM, si un adversario modifica un solo bit del sobre digital (cabecera, nonce o contenido cifrado), el descifrado fallará de inmediato sin procesar datos adulterados.
+- **Private Key Protection**: Storing raw private keys on disk (`private_key.bin`) poses significant risks from accidental exposure and unauthorized process access. The `keychain.rs` implementation delegates private key storage to the OS-level credential vault.
+- **Git Hygiene**: Generated `.bin` files are explicitly included in `.gitignore` to prevent committing cryptographic secrets or test envelopes.
+- **Cryptographically Secure Entropy**: All key material and initialization nonces are generated using `rand::rngs::OsRng`, sourcing hardware entropy directly from the OS kernel (`/dev/urandom` / `getrandom`).
+- **Integrity and Authenticity**: Using AES-256-GCM authenticated encryption guarantees that tampering with any portion of the envelope (including the ephemeral public key or nonce) will cause decryption to fail immediately, preventing chosen-ciphertext attacks.
 
 ---
 
-## 📦 Dependencias
+## 📦 Dependencies
 
-| Crate | Versión | Propósito |
+| Crate | Version | Purpose |
 |---|---|---|
-| [`x25519-dalek`](https://crates.io/crates/x25519-dalek) | `2.0` | Criptografía asimétrica Diffie-Hellman sobre Curve25519 |
-| [`aes-gcm`](https://crates.io/crates/aes-gcm) | `0.10` | Cifrado simétrico autenticado (AES-256-GCM) |
-| [`rand`](https://crates.io/crates/rand) | `0.8` | Generador de números aleatorios criptográficamente seguro (`OsRng`) |
-| [`keyring`](https://crates.io/crates/keyring) | `2.0` | Integración multiplataforma con el almacén seguro de credenciales |
-| [`hex`](https://crates.io/crates/hex) | `0.4` | Codificación/decodificación hexadecimal para resguardo en Keyring |
-| [`serde`](https://crates.io/crates/serde) / [`serde_json`](https://crates.io/crates/serde_json) | `1.0` | Serialización y manejo de estructuras de datos |
+| [`x25519-dalek`](https://crates.io/crates/x25519-dalek) | `2.0` | Diffie-Hellman key exchange over Curve25519 |
+| [`aes-gcm`](https://crates.io/crates/aes-gcm) | `0.10` | Authenticated symmetric encryption (AES-256-GCM) |
+| [`rand`](https://crates.io/crates/rand) | `0.8` | Cryptographically secure random number generator (`OsRng`) |
+| [`keyring`](https://crates.io/crates/keyring) | `2.0` | Cross-platform integration with OS credential storage |
+| [`hex`](https://crates.io/crates/hex) | `0.4` | Hexadecimal encoding/decoding for Keyring storage |
+| [`serde`](https://crates.io/crates/serde) / [`serde_json`](https://crates.io/crates/serde_json) | `1.0` | Serialization and data handling |
 
 ---
 
-## 📄 Licencia
+## 📄 License
 
-Este proyecto es de código abierto bajo la licencia MIT o Apache-2.0. Consulta los archivos correspondientes para más información.
+This project is open-source and available under the MIT or Apache-2.0 license.
